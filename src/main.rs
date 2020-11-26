@@ -18,6 +18,7 @@ fn main() {
     rocket::ignite()
         .register(catchers![
             routes::not_found,
+            routes::unprocessable_entity,
             routes::internal_server
         ])
         .mount("/", routes![

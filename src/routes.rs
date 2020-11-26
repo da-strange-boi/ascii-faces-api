@@ -14,10 +14,10 @@ use unicode_segmentation::UnicodeSegmentation;
 use base64::{encode, decode};
 use rand::prelude::*;
 
-use crate::models::NewFace;
+use crate::models::{NewFace, NewAccount};
 use crate::schema;
 use crate::DbConn;
-use crate::schema::owo_faces;
+use crate::schema::{owo_faces, accounts};
 
 #[derive(Debug)]
 pub struct ApiResponse {
@@ -38,7 +38,14 @@ impl<'r> Responder<'r> for ApiResponse {
 pub struct NewFaceValues {
     pub face: String,
     pub style: String,
-    pub emotion: String
+    pub emotion: String,
+    pub token: String
+}
+
+#[derive(Deserialize)]
+pub struct NewAccountValues {
+    pub ip_addr: String,
+    pub token: String
 }
 
 #[derive(Queryable, Serialize, Debug, QueryableByName)]
@@ -49,6 +56,14 @@ pub struct DBFace {
     face_size: i32,
     style: String,
     emotion: String
+}
+
+#[derive(Queryable, Serialize, Debug, QueryableByName)]
+#[table_name = "accounts"]
+pub struct DBAccount {
+    id: i32,
+    ip_addr: String,
+    token: String
 }
 
 // Database
@@ -74,6 +89,20 @@ pub fn create_face(conn: DbConn, face: &str, style: &str, emotion: &str) -> i32 
         .expect("An error has occurred");
 
     return inserted_id[0].id
+}
+
+pub fn create_account(conn: DbConn, ip_addr: &str, token: &str) {
+    use schema::accounts::dsl::accounts;
+
+    let new_account = NewAccount {
+        ip_addr,
+        token
+    };
+
+    diesel::insert_into(accounts)
+        .values(&new_account)
+        .execute(&conn.0)
+        .expect("Error saving new account");
 }
 
 pub fn get_faces(conn: DbConn) -> Vec<DBFace> {
@@ -168,9 +197,22 @@ pub fn new(conn: DbConn, entry: Json<NewFaceValues>) -> ApiResponse {
     let input_face = &entry.face;
     let input_style = &entry.style;
     let input_emotion = &entry.emotion;
+    let input_token = &entry.token;
 
     let styles: Vec<String> = vec!["regular".to_owned()];
     let emotions: Vec<String> = vec!["happy".to_owned(), "sad".to_owned(), "stress".to_owned(), "angry".to_owned(), "weird".to_owned()];
+
+    // check if token is valid
+    let inputted_token: Vec<DBAccount> = sql_query(format!("SELECt * FROM accounts WHERE token = '{}' LIMIT 1", input_token))
+        .load(&conn.0)
+        .expect("An error has occurred");
+
+    if inputted_token.is_empty() {
+        return ApiResponse {
+            json: json!({ "success": false, "reason": format!("Token '{}' doesn't exist", input_token) }),
+            status: Status::Unauthorized
+        }
+    }
 
     // check to see if face exists
     let inputted_face: Vec<DBFace> = sql_query(format!("SELECT * FROM owo_faces WHERE face = '{}' LIMIT 1", input_face))
@@ -206,10 +248,21 @@ pub fn new(conn: DbConn, entry: Json<NewFaceValues>) -> ApiResponse {
 }
 
 #[get("/account")]
-pub fn account(_conn: DbConn, client_addr: &ClientRealAddr) -> ApiResponse {
+pub fn account(conn: DbConn, client_addr: &ClientRealAddr) -> ApiResponse {
     let mut token = String::from("");
-    // TODO Ip checker
-    println!("{}", client_addr.get_ipv4_string().unwrap());
+    let ip_addr = client_addr.get_ipv4_string().unwrap();
+
+    // check to see if face exists
+    let sent_ip: Vec<DBAccount> = sql_query(format!("SELECT * FROM accounts WHERE ip_addr = '{}' LIMIT 1", ip_addr))
+        .load(&conn.0)
+        .expect("An error has occurred");
+
+    if !sent_ip.is_empty() {
+        return ApiResponse {
+            json: json!({ "success": false, "reason": format!("An account with the ip address '{}' already exists", ip_addr) }),
+            status: Status::Forbidden
+        }
+    }
 
     // token is made by
     // base64(1000-9999) . base64(random 12 characters)
@@ -230,6 +283,8 @@ pub fn account(_conn: DbConn, client_addr: &ClientRealAddr) -> ApiResponse {
     token.push_str(".");
     token.push_str(last_half.as_str());
 
+    create_account(conn, &ip_addr, &token);
+
     return ApiResponse {
         json: json!({ "success": true, "token": token }),
         status: Status::Ok
@@ -243,7 +298,15 @@ pub fn not_found(req: &Request) -> JsonValue {
         "success": false,
         "reason": format!("Path Not Found: {}", req.uri().path())
     })
-}   
+}  
+
+#[catch(422)]
+pub fn unprocessable_entity(_req: &Request) -> JsonValue {
+    json!({
+        "success": false,
+        "reason": format!("Unprocessable Entity")
+    })
+}
 
 #[catch(500)]
 pub fn internal_server(_req: &Request) -> JsonValue {
